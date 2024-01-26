@@ -1,0 +1,48 @@
+{
+    "storageAccounts": [
+        {
+            "name": "storageAccount1",
+            "authKey": "authKey1"
+        },
+        {
+            "name": "storageAccount2",
+            "authKey": "authKey2"
+        },
+        {
+            "name": "storageAccount3",
+            "authKey": "authKey3"
+        }
+    ],
+    "containers": [
+        {
+            "name": "container1",
+            "regex": "regex1"
+        },
+        {
+            "name": "container2",
+            "regex": "regex2"
+        },
+        {
+            "name": "container3",
+            "regex": "regex3"
+        }
+    ],
+    "stages": {
+        "load": {
+            "folderName": "loadFolder",
+            "threadCount": 5
+        },
+        "staging": {
+            "folderName": "stagingFolder",
+            "threadCount": 3
+        },
+        "completed": {
+            "folderName": "completedFolder",
+            "threadCount": 2
+        }
+    },
+    "maintenance": {
+        "minimumDiskFreePercentage": 10,
+        "mainDataFolder": "/path/to/mainDataFolder"
+    }
+}
