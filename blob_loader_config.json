@@ -27,22 +27,35 @@
             "regex": "regex3"
         }
     ],
-    "stages": {
-        "load": {
+    "stages": [
+        {
+            "name": "timer",
+            "folderName": "timerFolder",
+            "threadCount": 1
+        },
+        {
+            "name": "loader",
             "folderName": "loadFolder",
             "threadCount": 5
         },
-        "staging": {
+        {
+            "name": "staging",
             "folderName": "stagingFolder",
             "threadCount": 3
         },
-        "completed": {
+        {
+            "name": "completed",
             "folderName": "completedFolder",
             "threadCount": 2
         }
+    ]
     },
     "maintenance": {
-        "minimumDiskFreePercentage": 10,
-        "mainDataFolder": "/path/to/mainDataFolder"
+        "minDiskFreePercent": 10,
+        "dataFolder": "/path/to/mainDataFolder",
+        "defaultLagDuration": 10,
+        "defaultOldThreshold"
+            TimerThreadWait     int    `json:"timerThreadWait"`
+        }
     }
 }

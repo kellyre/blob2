@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"sync"
@@ -21,22 +22,17 @@ import (
 	"github.com/Azure/azure-storage-blob-go/azblob"
 )
 
-type Config struct {
-	StorageAccounts []StorageAccount `json:"storageAccounts"`
-	Containers      []Container      `json:"containers"`
-	Stages          []Stage          `json:"stages"`
-	Maintenance     Maintenance      `json:"maintenance"`
-}
-
 type StorageAccount struct {
 	Name    string `json:"name"`
 	AuthKey string `json:"authKey"`
 }
 
 type Container struct {
-	Name       string `json:"name"`
-	Regex      string `json:"regex"`
-	CaptureIdx int    `json:"captureIdx"`
+	Name         string `json:"name"`
+	Regex        string `json:"regex"`
+	CaptureIdx   int    `json:"captureIdx"`
+	LagDuration  int    `json:"lagDuration"`
+	OldThreshold int    `json:"oldThreshold"`
 }
 
 type Stage struct {
@@ -45,100 +41,60 @@ type Stage struct {
 	ThreadCount int    `json:"threadCount"`
 }
 
+type Config struct {
+	StorageAccounts []StorageAccount `json:"storageAccounts"`
+	Containers      []Container      `json:"containers"`
+	Stages          []Stage          `json:"stages"`
+	Maintenance     Maintenance      `json:"maintenance"`
+}
+
+type Task struct {
+	Type          string
+	DateString    string
+	Stage         *Stage
+	StorageAct    *StorageAccount
+	ContainerInfo *Container
+}
+
+type TaskQueue struct {
+}
+
 type Maintenance struct {
-	MinDiskFreePercent int    `json:"minDiskFreePercent"`
-	DataFolder         string `json:"dataFolder"`
+	MinDiskFreePercent  int    `json:"minDiskFreePercent"`
+	DataFolder          string `json:"dataFolder"`
+	DefaultLagDuration  int    `json:"defaultLagDuration"`
+	DefaultOldThreshold int    `json:"defaultOldThreshold"`
+	TimerThreadWait     int    `json:"timerThreadWait"`
 }
 
-var (
-	ctx        = context.Background()
-	latestTime time.Time
-)
-
-func load_worker(wg *sync.WaitGroup, messageChannel <-chan string) {
-	defer wg.Done()
-	for i := range messageChannel {
-		time.Sleep(time.Second)
-		fmt.Println("done processing - ", i)
-	}
+// StagePause is safe to use concurrently
+type StagePause struct {
+	mu sync.Mutex
+	v  map[string]bool
 }
 
-func staging_worker(wg *sync.WaitGroup, messageChannel <-chan string) {
-	defer wg.Done()
-	for i := range messageChannel {
-		time.Sleep(time.Second)
-		fmt.Println("done processing - ", i)
-	}
+// Pause a given stage by name
+func (c *StagePause) Pause(key string) {
+	c.mu.Lock()
+	// Lock so only one goroutine at a time can access the map c.v.
+	c.v[key] = true
+	c.mu.Unlock()
 }
 
-func completed_worker(wg *sync.WaitGroup, messageChannel <-chan string) {
-	defer wg.Done()
-	for i := range messageChannel {
-		time.Sleep(time.Second)
-		fmt.Println("done processing - ", i)
-	}
+// Unpause a given stage by name
+func (c *StagePause) Unpause(key string) {
+	c.mu.Lock()
+	// Lock so only one goroutine at a time can access the map c.v.
+	c.v[key] = false
+	c.mu.Unlock()
 }
 
-func main() {
-	config, err := loadConfig("blob_loader_config.json")
-	if err != nil {
-		panic(err)
-	}
-
-	/*
-	 This section will create worker groups for all three stages and start them. The worker groups will
-	 process blobs from the storage accounts and containers specified in the configuration file. The three
-	 stages are: load, staging and completed. The load stage will download blobs from Azure Storage and
-	 save them to the local disk. The staging stage will move blobs from the load folder to the staging
-	 folder. The completed stage will move blobs from the staging folder to the completed folder.
-	*/
-
-	// Create worker groups for each stage
-	load_wg := new(sync.WaitGroup)
-	staging_wg := new(sync.WaitGroup)
-	completed_wg := new(sync.WaitGroup)
-
-	// Create channels for each stage
-	load_channel := make(chan string)
-	staging_channel := make(chan string)
-	completed_channel := make(chan string)
-
-	// loop starting workers with channels
-	for _, stage := range config.Stages {
-		switch stage.Name {
-		case "load":
-			for i := 0; i < stage.ThreadCount; i++ {
-				load_wg.Add(1)
-				go load_worker(load_wg, load_channel)
-			}
-		case "staging":
-			for i := 0; i < stage.ThreadCount; i++ {
-				staging_wg.Add(1)
-				go staging_worker(staging_wg, staging_channel)
-			}
-		case "completed":
-			for i := 0; i < stage.ThreadCount; i++ {
-				completed_wg.Add(1)
-				go completed_worker(completed_wg, completed_channel)
-			}
-		}
-	}
-
-	/*	for _, stage := range config.Stages {
-			// Create a worker group for each stage
-			wg := worker.NewGroup(stage.Name, stage.ThreadCount)
-
-			// Start the worker group
-			wg.Start()
-			defer wg.Stop()
-		}
-	*/
-	for _, account := range config.StorageAccounts {
-		for _, container := range config.Containers {
-			// Process blobs for each storage account and container
-			processBlobs(account, container, config.Stages, config.Maintenance)
-		}
-	}
+// Value returns the current value of StagePause for the given key.
+func (c *StagePause) CheckPaused(key string) bool {
+	c.mu.Lock()
+	// Lock so only one goroutine at a time can access the map c.v.
+	defer c.mu.Unlock()
+	return c.v[key]
 }
 
 func loadConfig(filename string) (Config, error) {
@@ -163,49 +119,37 @@ func loadConfig(filename string) (Config, error) {
 	return config, nil
 }
 
-func processBlobs(account StorageAccount, container Container, stages []Stage, maintenance Maintenance) {
-	// TODO: Implement blob processing logic for each storage account and container
-	// Use the provided configuration parameters
-}
-
-/*
-func extractTimeFromBlobName(blobName string, regex string, captureIdx int) (time.Time, error) {
-	re := regexp.MustCompile(regex)
+func extractResourceAndTimeFromBlobName(blobName string) (string, time.Time, error) {
+	pattern := `^resourceId=(.*)/y=(\d+)/m=(\d+)/d=(\d+)/h=(\d+)/m=(\d+)/PT1H.json`
+	re := regexp.MustCompile(pattern)
+	resource := ""
 
 	matches := re.FindStringSubmatch(blobName)
-	if matches == nil || len(matches) <= captureIdx {
-		return time.Time{}, fmt.Errorf("unable to extract time from blob name")
+	if matches == nil || len(matches) < 6 {
+		return resource, time.Time{}, fmt.Errorf("invalid blob name format, %q\n", matches)
 	}
 
-	timeStr := matches[captureIdx]
-	blobTime, err := time.Parse("2006-01-02_15-04-05", timeStr)
-	if err != nil {
-		return time.Time{}, err
-	}
+	resource = matches[1]
+	year, _ := strconv.Atoi(matches[2])
+	month, _ := strconv.Atoi(matches[3])
+	day, _ := strconv.Atoi(matches[4])
+	hour, _ := strconv.Atoi(matches[5])
+	minute, _ := strconv.Atoi(matches[6])
 
-	return blobTime, nil
+	return resource, time.Date(year, time.Month(month), day, hour, minute, 0, 0, time.UTC), nil
 }
-*/
 
-/*
-var (
-	accountName   = os.Getenv("STOR_ACCOUNT_NAME")
-	accountKey    = os.Getenv("STOR_ACCOUNT_KEY")
-	containerName = os.Getenv("STOR_CONTAINER_NAME")
-	serviceURL    = "https://" + accountName + ".blob.core.windows.net"
-)
-*/
+func load_container_files(stage *Stage, storage_account *StorageAccount, container *Container, processTime time.Time) {
 
-const (
-	lagDuration  = time.Duration(5) * time.Minute // replace 5 with your desired lag in minutes
-	oldThreshold = time.Duration(24) * time.Hour
-)
-
-func load_container_files(storage_account *StorageAccount, container *Container, processTime time.Time) {
 	credential, err := azblob.NewSharedKeyCredential(storage_account.Name, storage_account.AuthKey)
 	if err != nil {
 		panic(err)
 	}
+
+	ctx := context.Background()
+	/*	lagDuration := time.Duration(container.LagDuration) * time.Minute
+		oldThreshold := time.Duration(container.OldThreshold) * time.Hour
+	*/
 
 	p := azblob.NewPipeline(credential, azblob.PipelineOptions{})
 	URL, _ := url.Parse(fmt.Sprintf("https://%s.blob.core.windows.net", storage_account.Name))
@@ -221,20 +165,24 @@ func load_container_files(storage_account *StorageAccount, container *Container,
 
 		// Process blobs
 		for _, blobInfo := range blobs.Segment.BlobItems {
-			blobTime, err := extractTimeFromBlobName(blobInfo.Name)
+			resource, blobTime, err := extractResourceAndTimeFromBlobName(blobInfo.Name)
 			if err != nil {
 				fmt.Println("Error extracting time:", err)
 				continue
 			}
-
 			// Skip old blobs or blobs newer than the lag
-			now := time.Now().UTC()
-			if blobTime.Before(now.Add(-oldThreshold)) || blobTime.After(now.Add(-lagDuration)) {
+			/*			now := time.Now().UTC()
+						if blobTime.Before(now.Add(-oldThreshold)) || blobTime.After(now.Add(-lagDuration)) {
+							continue
+						}
+			*/
+			if blobTime != processTime {
 				continue
 			}
 
 			fileName := blobTime.Format("2006-01-02_15-04-05.json")
-			file, err := os.OpenFile(fileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			fullPath := filepath.Join(stage.Folder, resource, fileName)
+			file, err := os.OpenFile(fullPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
 				fmt.Println("Error opening file:", err)
 				continue
@@ -257,20 +205,89 @@ func load_container_files(storage_account *StorageAccount, container *Container,
 	}
 }
 
-func extractTimeFromBlobName(blobName string) (time.Time, error) {
-	pattern := `y=(\d+)/m=(\d+)/d=(\d+)/h=(\d+)/m=(\d+)/PT1H.json`
-	re := regexp.MustCompile(pattern)
+func loaderTask(task *Task) Task {
+	time.Sleep(10 * time.Second)
+	return *task
+}
 
-	matches := re.FindStringSubmatch(blobName)
-	if matches == nil || len(matches) < 6 {
-		return time.Time{}, fmt.Errorf("invalid blob name format, %q\n", matches)
+func stagingTask(task *Task) Task {
+	time.Sleep(10 * time.Second)
+	return *task
+}
+
+func completedTask(task *Task) Task {
+	time.Sleep(10 * time.Second)
+	return *task
+}
+
+func worker(wg *sync.WaitGroup, tasks <-chan Task, results chan<- Task) {
+	defer wg.Done()
+	for task := range tasks {
+		switch task.Stage.Name {
+		case "timer":
+			fmt.Printf("In timer\n")
+			time.Sleep(2 * time.Second)
+			results <- task
+		case "loader":
+			fmt.Printf("In loader\n")
+			task = loaderTask(&task)
+			results <- task
+		case "staging":
+			fmt.Printf("In staging\n")
+			task = stagingTask(&task)
+			results <- task
+		case "completed":
+			fmt.Printf("In completed\n")
+			task = completedTask(&task)
+			results <- task
+		}
+	}
+}
+
+/*
+func interrogateContainer(account StorageAccount, container Container) *TaskQueue {
+	// TODO: Go through container and populate container queue with list of
+	// times to process
+}
+*/
+
+func processBlobs(account StorageAccount, container Container, stages []Stage, maintenance Maintenance) {
+	// TODO: Implement blob processing logic for each storage account and container
+	// Use the provided configuration parameters
+}
+
+func main() {
+	config, err := loadConfig("blob_loader_config.json")
+	if err != nil {
+		panic(err)
 	}
 
-	year, _ := strconv.Atoi(matches[1])
-	month, _ := strconv.Atoi(matches[2])
-	day, _ := strconv.Atoi(matches[3])
-	hour, _ := strconv.Atoi(matches[4])
-	minute, _ := strconv.Atoi(matches[5])
+	wg := new(sync.WaitGroup)
 
-	return time.Date(year, time.Month(month), day, hour, minute, 0, 0, time.UTC), nil
+	worker_tracker := make(map[string]int)
+	num_workers := 0
+	for _, stage := range config.Stages {
+		num_workers += stage.ThreadCount
+		worker_tracker[stage.Name] = stage.ThreadCount
+	}
+
+	// Create channels for each workers
+	tasks := make(chan Task, num_workers)
+	results := make(chan Task, num_workers)
+
+	// create workers
+	for i := 0; i < num_workers; i++ {
+		wg.Add(1)
+		go worker(wg, tasks, results)
+
+	}
+
+	for {
+		for _, account := range config.StorageAccounts {
+			for _, container := range config.Containers {
+				// Process blobs for each storage account and container
+				processBlobs(account, container, config.Stages, config.Maintenance)
+			}
+		}
+	}
 }

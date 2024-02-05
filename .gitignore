@@ -20,3 +20,6 @@
 
 # Output files (remove the comment below to include it)
 # *
+
+*.go_*
+
