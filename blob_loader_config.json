@@ -34,6 +34,11 @@
             "threadCount": 1
         },
         {
+            "name": "gatherinfo",
+            "folderName": "gatherInfoFolder",
+            "threadCount": 1
+        },
+        {
             "name": "loader",
             "folderName": "loadFolder",
             "threadCount": 5
@@ -48,14 +53,12 @@
             "folderName": "completedFolder",
             "threadCount": 2
         }
-    ]
-    },
+    ],
     "maintenance": {
         "minDiskFreePercent": 10,
         "dataFolder": "/path/to/mainDataFolder",
         "defaultLagDuration": 10,
-        "defaultOldThreshold"
-            TimerThreadWait     int    `json:"timerThreadWait"`
-        }
+        "defaultOldThreshold": 86400,
+        "TimerThreadWait": 2
     }
 }
