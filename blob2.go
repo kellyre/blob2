@@ -48,15 +48,20 @@ type Config struct {
 	Maintenance     Maintenance      `json:"maintenance"`
 }
 
+type StageState struct {
+	LastCompletedTime time.Time `json:"lastCompletedTime"`
+}
+
+type State struct {
+	Stages map[string]StageState `json:"stages"`
+}
+
 type Task struct {
 	Type          string
 	DateString    string
 	Stage         *Stage
 	StorageAct    *StorageAccount
 	ContainerInfo *Container
-}
-
-type TaskQueue struct {
 }
 
 type Maintenance struct {
@@ -117,6 +122,48 @@ func loadConfig(filename string) (Config, error) {
 	}
 
 	return config, nil
+}
+
+func loadState(filename string) (State, error) {
+	var state State
+
+	file, err := os.Open(filename)
+	if err != nil {
+		return state, err
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return state, err
+	}
+
+	err = json.Unmarshal(data, &state)
+	if err != nil {
+		return state, err
+	}
+
+	return state, nil
+}
+
+func saveState(state State, filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	_, err = file.Write(data)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func extractResourceAndTimeFromBlobName(blobName string) (string, time.Time, error) {
@@ -205,6 +252,11 @@ func load_container_files(stage *Stage, storage_account *StorageAccount, contain
 	}
 }
 
+func gatherInfoTask(task *Task) Task {
+	time.Sleep(10 * time.Second)
+	return *task
+}
+
 func loaderTask(task *Task) Task {
 	time.Sleep(10 * time.Second)
 	return *task
@@ -228,6 +280,10 @@ func worker(wg *sync.WaitGroup, tasks <-chan Task, results chan<- Task) {
 			fmt.Printf("In timer\n")
 			time.Sleep(2 * time.Second)
 			results <- task
+		case "gather_info":
+			fmt.Printf("In gather_info\n")
+			task = gatherInfoTask(&task)
+			results <- task
 		case "loader":
 			fmt.Printf("In loader\n")
 			task = loaderTask(&task)
@@ -243,13 +299,6 @@ func worker(wg *sync.WaitGroup, tasks <-chan Task, results chan<- Task) {
 		}
 	}
 }
-
-/*
-func interrogateContainer(account StorageAccount, container Container) *TaskQueue {
-	// TODO: Go through container and populate container queue with list of
-	// times to process
-}
-*/
 
 func processBlobs(account StorageAccount, container Container, stages []Stage, maintenance Maintenance) {
 	// TODO: Implement blob processing logic for each storage account and container
